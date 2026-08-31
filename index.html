@@ -113,13 +113,13 @@ const app = {
 
   getNames() {
     const sn = this.state.setupNames;
-    const n0 = (sn && sn[0].trim()) || 'Player 1';
-    const n1 = (sn && sn[1].trim()) || 'Player 2';
+    const n0 = (sn && sn[0].trim()) || 'Bea';
+    const n1 = (sn && sn[1].trim()) || 'Tom';
     return [n0, n1];
   },
 
   getDraft() {
-    return this.state.setupNames || ['Player 1', 'Player 2'];
+    return this.state.setupNames || ['Bea', 'Tom'];
   },
 
   // Board math
@@ -434,8 +434,8 @@ const app = {
     const draft = this.getDraft();
     const sd = this.state.setupDealer;
     const canStart = draft[0].trim().length > 0 && draft[1].trim().length > 0;
-    const dn0 = draft[0].trim() || 'Player 1';
-    const dn1 = draft[1].trim() || 'Player 2';
+    const dn0 = draft[0].trim() || 'Bea';
+    const dn1 = draft[1].trim() || 'Tom';
     const summary = (sd === 0 ? dn0 : dn1) + ' deals first, so the box is theirs. ' + (sd === 0 ? dn1 : dn0) + ' counts first at the show.';
     const primaryBtn = `width:100%;min-height:56px;padding:8px 0;box-sizing:border-box;border-radius:16px;border:none;background:${T.ink};color:${T.bg};font:500 16px system-ui;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0`;
     const disabledBtn = primaryBtn.replace(`background:${T.ink}`, `background:${ia(.16)}`).replace(`color:${T.bg}`, `color:${ia(.4)}`);
@@ -445,9 +445,9 @@ const app = {
     html += `<h1 style="font:700 34px/1.05 system-ui;letter-spacing:-.03em;color:${T.ink};margin:0">New game</h1>`;
 
     html += `<div style="display:flex;flex-direction:column;gap:16px;flex:none">`;
-    html += `<div><div style="font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;color:${ia(.42)};margin-bottom:8px">Player 1</div>`;
+    html += `<div><div style="font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;color:${ia(.42)};margin-bottom:8px">Bea</div>`;
     html += `<input data-input="name0" style="width:100%;box-sizing:border-box;padding:15px 16px;border-radius:15px;border:1px solid ${ia(.16)};background:${T.card};font:500 17px system-ui;color:${T.ink};outline:none" value="${this.esc(draft[0])}" placeholder="Name"></div>`;
-    html += `<div><div style="font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;color:${ia(.42)};margin-bottom:8px">Player 2</div>`;
+    html += `<div><div style="font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;color:${ia(.42)};margin-bottom:8px">Tom</div>`;
     html += `<input data-input="name1" style="width:100%;box-sizing:border-box;padding:15px 16px;border-radius:15px;border:1px solid ${ia(.16)};background:${T.card};font:500 17px system-ui;color:${T.ink};outline:none" value="${this.esc(draft[1])}" placeholder="Name"></div>`;
     html += `</div>`;
 
