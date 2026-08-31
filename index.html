@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peg It — Cribbage Scorekeeper</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+button{font-family:inherit;cursor:pointer}
+input{font-family:inherit}
+@keyframes pop{0%{transform:scale(.94);opacity:0}100%{transform:scale(1);opacity:1}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+'use strict';
+const PEG_A = '#1F6F5C';
+const PEG_B = 'oklch(0.52 0.13 42)';
+const ON_ACCENT = '#fffdf7';
+
+const app = {
+  timers: {},
+  _saveT: null,
+  state: null,
+
+  init() {
+    let savedDark = null, savedPegs = null;
+    try { savedDark = localStorage.getItem('crib.dark'); savedPegs = localStorage.getItem('crib.pegs'); } catch(e) {}
+    this.state = {
+      g: this.newGame(),
+      val: 0,
+      phase: 'play',
+      playScorer: 0,
+      screen: 'home',
+      setupNames: null,
+      setupDealer: 0,
+      dark: savedDark === null ? false : savedDark === '1',
+      twoPegs: savedPegs === null ? true : savedPegs === '2'
+    };
+    const prior = this.loadGame();
+    if (prior) {
+      this.state.g = prior.g;
+      this.state.phase = prior.phase || 'play';
+      this.state.playScorer = prior.playScorer || 0;
+      this.state.setupNames = prior.names || null;
+      this.state.setupDealer = prior.dealerSetup || 0;
+    }
+    document.getElementById('app').addEventListener('click', e => {
+      const btn = e.target.closest('[data-action]');
+      if (btn) this.handleAction(btn.dataset.action, btn);
+    });
+    document.getElementById('app').addEventListener('input', e => {
+      const inp = e.target.closest('[data-input]');
+      if (inp) this.handleInput(inp.dataset.input, inp.value);
+    });
+    this.render();
+  },
+
+  newGame() {
+    return { p: [0,0], prev: [0,0], shown: [0,0], dealer: 1, hist: [], winner: null };
+  },
+
+  loadGame() {
+    try {
+      const raw = localStorage.getItem('crib.game');
+      if (!raw) return null;
+      const d = JSON.parse(raw);
+      if (!d || !d.g || !Array.isArray(d.g.p) || d.g.winner !== null || !d.g.hist || !d.g.hist.length) return null;
+      d.g.shown = d.g.p.slice();
+      return d;
+    } catch(e) { return null; }
+  },
+
+  saveGame() {
+    const g = this.state.g;
+    try {
+      if (g.winner !== null || !g.hist.length) localStorage.removeItem('crib.game');
+      else localStorage.setItem('crib.game', JSON.stringify({
+        g, phase: this.state.phase, playScorer: this.state.playScorer,
+        names: this.state.setupNames, dealerSetup: this.state.setupDealer
+      }));
+    } catch(e) {}
+  },
+
+  queueSave() {
+    clearTimeout(this._saveT);
+    this._saveT = setTimeout(() => this.saveGame(), 0);
+  },
+
+  setState(updates) {
+    Object.assign(this.state, typeof updates === 'function' ? updates(this.state) : updates);
+    this.render();
+  },
+
+  setGame(patch) {
+    this.state.g = Object.assign({}, this.state.g, patch);
+    this.render();
+  },
+
+  toggleDark() {
+    this.state.dark = !this.state.dark;
+    try { localStorage.setItem('crib.dark', this.state.dark ? '1' : '0'); } catch(e) {}
+    this.render();
+  },
+
+  setPegs(two) {
+    this.state.twoPegs = two;
+    try { localStorage.setItem('crib.pegs', two ? '2' : '1'); } catch(e) {}
+    this.render();
+  },
+
+  getNames() {
+    const sn = this.state.setupNames;
+    const n0 = (sn && sn[0].trim()) || 'Player 1';
+    const n1 = (sn && sn[1].trim()) || 'Player 2';
+    return [n0, n1];
+  },
+
+  getDraft() {
+    return this.state.setupNames || ['Player 1', 'Player 2'];
+  },
+
+  // Board math
+  serp(i) {
+    const row = Math.floor(i / 30);
+    let col = i % 30;
+    if (row % 2) col = 29 - col;
+    return { x: 20 + col * 8 + Math.floor(col / 5) * 5, y: row * 22 };
+  },
+
+  serpPos(score, lane, slot) {
+    const yOff = lane * 88;
+    if (score <= 0) return { x: 5 + (slot ? 9 : 0), y: yOff };
+    if (score >= 121) return { x: 5, y: 3 * 22 + yOff };
+    const q = this.serp(score - 1);
+    return { x: q.x, y: q.y + yOff };
+  },
+
+  lerpPos(score, lane) {
+    const fn = s => this.serpPos(Math.round(Math.max(0, Math.min(121, s))), lane, 0);
+    if (score <= 0 || score >= 120) return fn(score);
+    const f = Math.floor(score), t = score - f;
+    const a = fn(f);
+    if (t < 0.001) return a;
+    const b = fn(f + 1);
+    return {
+      x: a.x + (b.x - a.x) * t,
+      y: a.y + (b.y - a.y) * t - Math.sin(t * Math.PI) * 5.5
+    };
+  },
+
+  // Animation
+  animate(pl, from, to) {
+    cancelAnimationFrame(this.timers[pl]);
+    const dist = Math.abs(to - from) || 1;
+    const dur = Math.max(240, Math.min(1500, dist * 78));
+    const t0 = performance.now();
+    const tick = now => {
+      const p = Math.min(1, (now - t0) / dur);
+      const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+      const val = p < 1 ? from + (to - from) * e : to;
+      const shown = this.state.g.shown.slice();
+      shown[pl] = val;
+      this.state.g = Object.assign({}, this.state.g, { shown });
+      this.updatePegs();
+      if (p < 1) this.timers[pl] = requestAnimationFrame(tick);
+      else this.render();
+    };
+    this.timers[pl] = requestAnimationFrame(tick);
+  },
+
+  updatePegs() {
+    const g = this.state.g;
+    const f0 = this.lerpPos(g.shown[0], 0);
+    const f1 = this.lerpPos(g.shown[1], 1);
+    const el0 = document.getElementById('peg0');
+    const el1 = document.getElementById('peg1');
+    if (el0) { el0.style.left = (f0.x - 7) + 'px'; el0.style.top = (f0.y - 7) + 'px'; }
+    if (el1) { el1.style.left = (f1.x - 7) + 'px'; el1.style.top = (f1.y - 7) + 'px'; }
+    const s0El = document.getElementById('score0');
+    const s1El = document.getElementById('score1');
+    if (s0El) s0El.textContent = Math.round(g.shown[0]);
+    if (s1El) s1El.textContent = Math.round(g.shown[1]);
+  },
+
+  quip(v, scorer, ph, names) {
+    const g = this.state.g;
+    const me = g.p[scorer], them = g.p[1 - scorer];
+    if (me + v >= 121) return "That's the game — peg it out.";
+    if (v === 29) return 'Twenty-nine. The perfect hand.';
+    if (v === 19) return 'Nineteen: the hand that cannot be.';
+    if (ph === 'play') {
+      if (v >= 8) return 'Big run in play.';
+      if (v >= 4) return 'Good pegging.';
+      return them - me > 25 ? 'Every hole counts from back here.' : 'Fifteen two, thirty-one, pairs, runs, go.';
+    }
+    const counts = g.hist.filter(x => x.t === 'score' && x.pl === scorer && x.phase !== 'play').map(x => x.to - x.from);
+    const lean = counts.slice(-2);
+    const firstHand = g.hist.filter(x => x.t === 'score' && x.phase !== 'play').length < 2;
+    if (v >= 20) return firstHand ? 'Off to a big start!' : them - me > 20 ? 'That claws it right back.' : 'Twenty-plus — that hurts.';
+    if (v >= 12) return firstHand ? 'Strong opening hand.' : 'Solid count.';
+    if (v <= 4 && lean.length === 2 && lean[0] <= 4 && lean[1] <= 4) return 'Tough run for ' + names[scorer] + ' :(';
+    if (v <= 2 && them >= 91 && me < 91) return 'Skunk line is close. Needs more than that.';
+    if (v <= 2) return 'Not much in that one.';
+    return ph === 'crib' ? 'A quiet box.' : 'Fifteens, pairs, runs, flush, nobs.';
+  },
+
+  commit() {
+    const g = this.state.g;
+    const pts = this.state.val;
+    if (g.winner !== null) return;
+    const ph = this.state.phase;
+    if (ph === 'play' && !pts) return;
+    const pl = ph === 'play' ? this.state.playScorer : ph === 'hand1' ? 1 - g.dealer : g.dealer;
+    const from = g.p[pl], to = Math.min(121, from + pts);
+    const next = ph === 'play' ? 'play' : ph === 'hand1' ? 'hand2' : ph === 'hand2' ? 'crib' : 'play';
+    const nextDealer = ph === 'crib' ? 1 - g.dealer : g.dealer;
+    const p = g.p.slice(); p[pl] = to;
+    const prev = g.prev.slice(); const movingFrom = prev[pl]; prev[pl] = from;
+    const hist = g.hist.concat([{
+      t: 'score', pl, from, to, prev: g.prev.slice(), phase: ph, dealer: g.dealer, scorer: this.state.playScorer
+    }]);
+    this.state.phase = next;
+    this.state.val = 0;
+    this.state.playScorer = ph === 'crib' ? 1 - nextDealer : this.state.playScorer;
+    this.state.g = Object.assign({}, g, { p, prev, dealer: nextDealer, hist, winner: to >= 121 ? pl : null });
+    this.queueSave();
+    this.render();
+    if (to !== movingFrom) this.animate(pl, movingFrom, to);
+  },
+
+  endPlay() {
+    const g = this.state.g;
+    if (g.winner !== null || this.state.phase !== 'play') return;
+    this.state.g = Object.assign({}, g, {
+      hist: g.hist.concat([{ t: 'phase', phase: 'play', dealer: g.dealer, scorer: this.state.playScorer }])
+    });
+    this.state.phase = 'hand1';
+    this.state.val = 0;
+    this.queueSave();
+    this.render();
+  },
+
+  undo() {
+    const g = this.state.g;
+    if (!g.hist.length) return;
+    const h = g.hist[g.hist.length - 1];
+    const p = g.p.slice();
+    const prev = h.t === 'score' ? h.prev.slice() : g.prev.slice();
+    if (h.t === 'score') p[h.pl] = h.from;
+    const oldShown = g.shown;
+    this.state.g = Object.assign({}, g, { p, prev, dealer: h.dealer, hist: g.hist.slice(0, -1), winner: null });
+    this.state.phase = h.phase;
+    this.state.playScorer = h.scorer;
+    this.state.val = 0;
+    this.queueSave();
+    this.render();
+    if (h.t === 'score' && h.to !== h.from) this.animate(h.pl, oldShown[h.pl], h.from);
+  },
+
+  // Theme
+  theme() {
+    const dark = this.state.dark;
+    return dark
+      ? { bg:'#1b1917', outer:'#100f0e', panel:'#262220', card:'#231f1c', ink:'#f2ece0', rgb:'242,236,224', shadow:'rgba(0,0,0,.5)' }
+      : { bg:'#f6f1e6', outer:'#efe9dc', panel:'#e8dfcc', card:'#fffdf7', ink:'#221f1a', rgb:'34,31,26', shadow:'rgba(34,31,26,.55)' };
+  },
+
+  ia(a) { return 'rgba(' + this.theme().rgb + ',' + a + ')'; },
+
+  dot(x, y, i) {
+    const d = 6, major = (i + 1) % 5 === 0;
+    const base = this.state.dark ? (major ? .3 : .17) : (major ? .22 : .13);
+    return `position:absolute;left:${x-d/2}px;top:${y-d/2}px;width:${d}px;height:${d}px;border-radius:50%;background:rgba(${this.theme().rgb},${base})`;
+  },
+
+  pegCSS(x, y, color) {
+    return `position:absolute;left:${x-7}px;top:${y-7}px;width:14px;height:14px;border-radius:50%;background:${color};box-shadow:0 2px 0 rgba(0,0,0,.22),inset 0 -2px 3px rgba(0,0,0,.18),inset 0 2px 2px rgba(255,255,255,.35);border:1.5px solid rgba(255,255,255,.5);z-index:3`;
+  },
+
+  esc(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  },
+
+  // Action handler
+  handleAction(action, el) {
+    switch(action) {
+      case 'goHome': this.state.screen = 'home'; this.render(); break;
+      case 'goSetup': this.state.setupNames = this.state.setupNames || this.getDraft(); this.state.screen = 'setup'; this.render(); break;
+      case 'goGame': this.state.screen = 'game'; this.state.val = 0; this.render(); break;
+      case 'goSettings': this.state.screen = 'settings'; this.render(); break;
+      case 'toggleDark': this.toggleDark(); break;
+      case 'pickDouble': this.setPegs(true); break;
+      case 'pickSingle': this.setPegs(false); break;
+      case 'pickDealer0': this.state.setupDealer = 0; this.render(); break;
+      case 'pickDealer1': this.state.setupDealer = 1; this.render(); break;
+      case 'startGame': {
+        const draft = this.getDraft();
+        if (!draft[0].trim() || !draft[1].trim()) return;
+        const g = this.newGame();
+        g.dealer = this.state.setupDealer;
+        this.state.g = g;
+        this.state.val = 0;
+        this.state.phase = 'play';
+        this.state.playScorer = 1 - this.state.setupDealer;
+        this.state.screen = 'game';
+        this.queueSave();
+        this.render();
+        break;
+      }
+      case 'scorer0': this.state.playScorer = 0; this.render(); break;
+      case 'scorer1': this.state.playScorer = 1; this.render(); break;
+      case 'inc': this.state.val = Math.min(this.state.phase === 'play' ? 14 : 29, this.state.val + 1); this.render(); break;
+      case 'dec': this.state.val = Math.max(0, this.state.val - 1); this.render(); break;
+      case 'commit': this.commit(); break;
+      case 'undo': this.undo(); break;
+      case 'endPlay': this.endPlay(); break;
+      case 'reset': {
+        this.state.g = this.newGame();
+        this.state.phase = 'play';
+        this.state.val = 0;
+        this.state.playScorer = 0;
+        this.state.screen = 'setup';
+        this.queueSave();
+        this.render();
+        break;
+      }
+      case 'rotate': {
+        if (this.state.phase === 'play') {
+          this.state.g = Object.assign({}, this.state.g, { dealer: 1 - this.state.g.dealer });
+          this.render();
+        }
+        break;
+      }
+      default: {
+        const m = action.match(/^pill(\d+)$/);
+        if (m) {
+          const cap = this.state.phase === 'play' ? 14 : 29;
+          this.state.val = Math.min(cap, this.state.val + parseInt(m[1]));
+          this.render();
+        }
+      }
+    }
+  },
+
+  handleInput(id, val) {
+    if (id === 'name0' || id === 'name1') {
+      const draft = (this.state.setupNames || this.getDraft()).slice();
+      draft[id === 'name0' ? 0 : 1] = val;
+      this.state.setupNames = draft;
+      this.render();
+    }
+  },
+
+  // Render
+  render() {
+    const T = this.theme();
+    const screen = this.state.screen;
+    const ia = a => this.ia(a);
+
+    document.body.style.background = T.outer;
+
+    let html = `<div style="min-height:100vh;display:flex;justify-content:center;background:${T.outer}">`;
+    html += `<div style="width:390px;min-height:100vh;background:${T.bg};overflow:hidden;position:relative;display:flex;flex-direction:column;transition:background .2s">`;
+
+    // Top bar
+    html += `<div style="height:44px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 26px;font:500 10px ui-monospace,'SF Mono',Menlo,monospace;color:${ia(.45)}">`;
+    html += `<span>9:41</span>`;
+    if (screen === 'home') {
+      html += `<span>CRIB</span>`;
+    } else {
+      html += `<button data-action="goHome" aria-label="Home" style="display:flex;align-items:center;justify-content:center;width:30px;height:30px;margin-right:-7px;border-radius:10px;border:1px solid ${ia(.14)};background:transparent;color:${ia(.66)};cursor:pointer;padding:0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11.2 12 3.6l8.5 7.6"></path><path d="M6.2 10.4V20h11.6v-9.6"></path></svg></button>`;
+    }
+    html += `</div>`;
+
+    if (screen === 'home') html += this.renderHome(T, ia);
+    else if (screen === 'setup') html += this.renderSetup(T, ia);
+    else if (screen === 'settings') html += this.renderSettings(T, ia);
+    else if (screen === 'game') html += this.renderGame(T, ia);
+
+    // Win overlay
+    if (this.state.g.winner !== null) html += this.renderWin(T, ia);
+
+    html += `</div></div>`;
+
+    const el = document.getElementById('app');
+    const focusId = document.activeElement?.dataset?.input;
+    const selStart = document.activeElement?.selectionStart;
+    const selEnd = document.activeElement?.selectionEnd;
+    el.innerHTML = html;
+    if (focusId) {
+      const inp = el.querySelector(`[data-input="${focusId}"]`);
+      if (inp) { inp.focus(); try { inp.setSelectionRange(selStart, selEnd); } catch(e) {} }
+    }
+  },
+
+  renderHome(T, ia) {
+    const names = this.getNames();
+    const g = this.state.g;
+    const hasGame = g.hist.length > 0 && g.winner === null;
+    const resumeLine = names[0] + ' ' + g.p[0] + ' · ' + names[1] + ' ' + g.p[1];
+
+    let dots = '';
+    for (let i = 0; i < 60; i++) {
+      const lane = i % 2, k = Math.floor(i / 2);
+      dots += `<div style="${this.dot(6 + k * 10 + Math.floor(k / 5) * 4, 14 + lane * 34, k)}"></div>`;
+    }
+    const hp0 = this.pegCSS(6 + 12 * 10 + 2 * 4, 14, PEG_A);
+    const hp1 = this.pegCSS(6 + 7 * 10 + 4, 48, PEG_B);
+
+    let html = `<div style="flex:1;display:flex;flex-direction:column;padding:6px 26px 34px;min-height:0">`;
+    html += `<div style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:22px">`;
+    html += `<div style="position:relative;height:66px;width:100%">${dots}<div style="${hp0}"></div><div style="${hp1}"></div></div>`;
+    html += `<div>`;
+    html += `<h1 style="font:700 46px/1.02 system-ui;letter-spacing:-.04em;color:${T.ink};margin:0">Peg it</h1>`;
+    html += `<p style="font:400 15px/1.5 system-ui;color:${ia(.55)};margin:10px 0 0;max-width:250px;text-wrap:pretty">A cribbage board for two. Fifteens, pairs, runs — and the long walk to 121.</p>`;
+    html += `</div></div>`;
+
+    html += `<div style="display:flex;flex-direction:column;gap:10px;flex:none">`;
+    if (hasGame) {
+      html += `<button data-action="goGame" style="width:100%;min-height:56px;padding:8px 0;box-sizing:border-box;border-radius:16px;border:none;background:${T.ink};color:${T.bg};font:500 16px system-ui;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0">Continue game<span style="display:block;font:400 11px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.06em;opacity:.55;margin-top:3px">${this.esc(resumeLine)}</span></button>`;
+      html += `<button data-action="goSetup" style="width:100%;height:56px;border-radius:16px;border:1px solid ${ia(.18)};background:transparent;color:${T.ink};font:500 16px system-ui;cursor:pointer">New game</button>`;
+    } else {
+      html += `<button data-action="goSetup" style="width:100%;min-height:56px;padding:8px 0;box-sizing:border-box;border-radius:16px;border:none;background:${T.ink};color:${T.bg};font:500 16px system-ui;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0">Start</button>`;
+    }
+    html += `<button data-action="goSettings" style="width:100%;height:56px;border-radius:16px;border:1px solid ${ia(.18)};background:transparent;color:${T.ink};font:500 16px system-ui;cursor:pointer">Settings</button>`;
+    html += `</div></div>`;
+    return html;
+  },
+
+  renderSetup(T, ia) {
+    const draft = this.getDraft();
+    const sd = this.state.setupDealer;
+    const canStart = draft[0].trim().length > 0 && draft[1].trim().length > 0;
+    const dn0 = draft[0].trim() || 'Player 1';
+    const dn1 = draft[1].trim() || 'Player 2';
+    const summary = (sd === 0 ? dn0 : dn1) + ' deals first, so the box is theirs. ' + (sd === 0 ? dn1 : dn0) + ' counts first at the show.';
+    const primaryBtn = `width:100%;min-height:56px;padding:8px 0;box-sizing:border-box;border-radius:16px;border:none;background:${T.ink};color:${T.bg};font:500 16px system-ui;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0`;
+    const disabledBtn = primaryBtn.replace(`background:${T.ink}`, `background:${ia(.16)}`).replace(`color:${T.bg}`, `color:${ia(.4)}`);
+
+    let html = `<div style="flex:1;display:flex;flex-direction:column;padding:6px 26px 34px;gap:22px;min-height:0">`;
+    html += `<button data-action="goHome" style="align-self:flex-start;padding:6px 0;border:none;background:none;font:500 12px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.08em;color:${ia(.5)};cursor:pointer">← BACK</button>`;
+    html += `<h1 style="font:700 34px/1.05 system-ui;letter-spacing:-.03em;color:${T.ink};margin:0">New game</h1>`;
+
+    html += `<div style="display:flex;flex-direction:column;gap:16px;flex:none">`;
+    html += `<div><div style="font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;color:${ia(.42)};margin-bottom:8px">Player 1</div>`;
+    html += `<input data-input="name0" style="width:100%;box-sizing:border-box;padding:15px 16px;border-radius:15px;border:1px solid ${ia(.16)};background:${T.card};font:500 17px system-ui;color:${T.ink};outline:none" value="${this.esc(draft[0])}" placeholder="Name"></div>`;
+    html += `<div><div style="font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;color:${ia(.42)};margin-bottom:8px">Player 2</div>`;
+    html += `<input data-input="name1" style="width:100%;box-sizing:border-box;padding:15px 16px;border-radius:15px;border:1px solid ${ia(.16)};background:${T.card};font:500 17px system-ui;color:${T.ink};outline:none" value="${this.esc(draft[1])}" placeholder="Name"></div>`;
+    html += `</div>`;
+
+    html += `<div style="flex:none">`;
+    html += `<div style="font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;color:${ia(.42)};margin-bottom:8px">Who has the first box?</div>`;
+    html += `<div style="display:flex;gap:10px">`;
+    html += `<button data-action="pickDealer0" style="flex:1;padding:18px 16px;border-radius:18px;cursor:pointer;text-align:left;transition:background .16s;border:1px solid ${sd===0?PEG_A:ia(.14)};background:${sd===0?PEG_A:'transparent'};color:${sd===0?ON_ACCENT:T.ink}"><span style="display:block;font:500 15px system-ui">${this.esc(dn0)}</span><span style="display:block;font:400 11px ui-monospace,'SF Mono',Menlo,monospace;opacity:.65;margin-top:4px">DEALS FIRST</span></button>`;
+    html += `<button data-action="pickDealer1" style="flex:1;padding:18px 16px;border-radius:18px;cursor:pointer;text-align:left;transition:background .16s;border:1px solid ${sd===1?PEG_B:ia(.14)};background:${sd===1?PEG_B:'transparent'};color:${sd===1?ON_ACCENT:T.ink}"><span style="display:block;font:500 15px system-ui">${this.esc(dn1)}</span><span style="display:block;font:400 11px ui-monospace,'SF Mono',Menlo,monospace;opacity:.65;margin-top:4px">DEALS FIRST</span></button>`;
+    html += `</div>`;
+    html += `<p style="font:400 12px/1.5 system-ui;color:${ia(.5)};margin:12px 0 0;text-wrap:pretty">${this.esc(summary)}</p>`;
+    html += `</div>`;
+
+    html += `<div style="flex:1"></div>`;
+    html += `<button data-action="startGame" style="${canStart ? primaryBtn : disabledBtn}">Start game</button>`;
+    html += `</div>`;
+    return html;
+  },
+
+  renderSettings(T, ia) {
+    const dark = this.state.dark;
+    const twoPegs = this.state.twoPegs;
+    let html = `<div style="flex:1;display:flex;flex-direction:column;padding:6px 26px 34px;gap:22px;min-height:0">`;
+    html += `<button data-action="goHome" style="align-self:flex-start;padding:6px 0;border:none;background:none;font:500 12px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.08em;color:${ia(.5)};cursor:pointer">← BACK</button>`;
+    html += `<h1 style="font:700 34px/1.05 system-ui;letter-spacing:-.03em;color:${T.ink};margin:0">Settings</h1>`;
+
+    // Dark mode
+    html += `<div style="flex:none">`;
+    html += `<div style="font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;color:${ia(.42)};margin-bottom:8px">Appearance</div>`;
+    html += `<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 18px;border-radius:18px;border:1px solid ${ia(.12)};background:${T.card}">`;
+    html += `<div><div style="font:500 16px system-ui;color:${T.ink}">Dark mode</div><div style="font:400 12.5px system-ui;color:${ia(.5)};margin-top:3px">Dim the board for late games.</div></div>`;
+    html += `<button data-action="toggleDark" aria-label="Toggle dark mode" style="flex:none;width:52px;height:30px;border-radius:999px;border:none;padding:3px;cursor:pointer;display:flex;justify-content:${dark?'flex-end':'flex-start'};background:${dark?PEG_A:ia(.16)};transition:background .18s"><span style="display:block;width:24px;height:24px;border-radius:50%;background:${dark?'#fffdf7':T.card};box-shadow:0 1px 3px rgba(0,0,0,.28)"></span></button>`;
+    html += `</div></div>`;
+
+    // Peg mode
+    html += `<div style="flex:none">`;
+    html += `<div style="font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;color:${ia(.42)};margin-bottom:8px">Pegging</div>`;
+    html += `<div style="display:flex;gap:10px">`;
+    html += `<button data-action="pickDouble" style="flex:1;padding:16px;border-radius:18px;cursor:pointer;text-align:left;transition:background .16s;border:1px solid ${twoPegs?PEG_A:ia(.14)};background:${twoPegs?PEG_A:'transparent'};color:${twoPegs?ON_ACCENT:T.ink}"><span style="display:block;font:500 15px system-ui">Two pegs</span><span style="display:block;font:400 11.5px/1.4 system-ui;opacity:.65;margin-top:5px">Leapfrog — the trailing peg shows your last score.</span></button>`;
+    html += `<button data-action="pickSingle" style="flex:1;padding:16px;border-radius:18px;cursor:pointer;text-align:left;transition:background .16s;border:1px solid ${twoPegs?ia(.14):PEG_A};background:${twoPegs?'transparent':PEG_A};color:${twoPegs?T.ink:ON_ACCENT}"><span style="display:block;font:500 15px system-ui">One peg</span><span style="display:block;font:400 11.5px/1.4 system-ui;opacity:.65;margin-top:5px">Just the front peg, nothing behind it.</span></button>`;
+    html += `</div></div>`;
+
+    html += `<div style="flex:1"></div>`;
+    html += `<div style="font:400 12px/1.5 system-ui;color:${ia(.5)};margin:12px 0 0;text-wrap:pretty">These preferences are remembered on this device.</div>`;
+    html += `</div>`;
+    return html;
+  },
+
+  renderGame(T, ia) {
+    const g = this.state.g;
+    const ph = this.state.phase;
+    const v = this.state.val;
+    const names = this.getNames();
+    const nonDealer = 1 - g.dealer;
+    const scorer = ph === 'play' ? this.state.playScorer : ph === 'hand1' ? nonDealer : g.dealer;
+    const sc = scorer === 0 ? PEG_A : PEG_B;
+    const cap = ph === 'play' ? 14 : 29;
+
+    const nameStyle = (on, c) => `font:500 12px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:${on?c:ia(.42)};display:flex;align-items:baseline;gap:8px`;
+    const whoStyle = (on, c) => `flex:1;height:40px;border-radius:12px;cursor:pointer;font:500 13px system-ui;transition:background .16s;border:1px solid ${on?c:ia(.14)};background:${on?c:'transparent'};color:${on?ON_ACCENT:ia(.6)}`;
+
+    let html = `<div style="flex:1;display:flex;flex-direction:column;padding:6px 22px 26px;gap:16px;min-height:0">`;
+
+    // Scores
+    html += `<div style="display:flex;justify-content:space-between;align-items:flex-end;flex:none">`;
+    html += `<div style="${nameStyle(scorer===0, PEG_A)}">${this.esc(names[0])} <span id="score0" style="font:700 26px system-ui;letter-spacing:-.02em">${Math.round(g.shown[0])}</span></div>`;
+    html += `<div style="${nameStyle(scorer===1, PEG_B)}"><span id="score1" style="font:700 26px system-ui;letter-spacing:-.02em">${Math.round(g.shown[1])}</span> ${this.esc(names[1])}</div>`;
+    html += `</div>`;
+
+    // Box indicator
+    html += `<div style="display:flex;align-items:center;justify-content:space-between;flex:none;margin-top:-6px">`;
+    html += `<button data-action="rotate" style="display:flex;align-items:center;gap:7px;padding:5px 10px 5px 7px;border-radius:999px;background:${g.dealer===0?PEG_A:PEG_B};color:${ON_ACCENT};font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.08em;cursor:${ph==='play'?'pointer':'default'};border:none;opacity:${ph==='play'?1:.55}"><span style="width:15px;height:19px;border-radius:3px;background:rgba(255,255,255,.32);border:1px solid rgba(255,255,255,.5);display:inline-block"></span>${this.esc(names[g.dealer].toUpperCase())}'S BOX</button>`;
+    html += `</div>`;
+
+    // Board
+    html += this.renderBoard(T, ia, g, names);
+
+    // Controls
+    html += `<div style="flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:12px;min-height:0">`;
+
+    // Phase steps
+    const order = ['play','hand1','hand2','crib'];
+    const idx = order.indexOf(ph);
+    const stepLabels = ['Play', names[nonDealer]+"'s hand", names[g.dealer]+"'s hand", names[g.dealer]+"'s box"];
+    html += `<div style="display:flex;gap:4px;width:100%">`;
+    stepLabels.forEach((label, i) => {
+      let s = `flex:1;text-align:center;padding:7px 0;border-radius:10px;font:500 10.5px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.04em;text-transform:uppercase;overflow:hidden;white-space:nowrap;`;
+      if (i === idx) s += `background:${sc};color:${ON_ACCENT}`;
+      else if (i < idx) s += `background:${ia(.09)};color:${ia(.42)}`;
+      else s += `background:transparent;border:1px solid ${ia(.12)};padding:6px 0;color:${ia(.32)}`;
+      html += `<div style="${s}">${this.esc(label)}</div>`;
+    });
+    html += `</div>`;
+
+    // Scorer buttons (play) or count label
+    if (ph === 'play') {
+      html += `<div style="display:flex;gap:8px;width:100%">`;
+      html += `<button data-action="scorer0" style="${whoStyle(scorer===0, PEG_A)}">${this.esc(names[0])} scored</button>`;
+      html += `<button data-action="scorer1" style="${whoStyle(scorer===1, PEG_B)}">${this.esc(names[1])} scored</button>`;
+      html += `</div>`;
+    } else {
+      html += `<div style="font:500 10px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;color:${sc}">${this.esc(names[scorer].toUpperCase())}${ph==='crib'?' COUNTS THE BOX':' COUNTS'}</div>`;
+    }
+
+    // Dial
+    html += `<div style="display:flex;align-items:center;gap:18px">`;
+    html += `<button data-action="dec" style="width:56px;height:56px;border-radius:50%;border:1px solid ${ia(.14)};background:${T.card};font:400 26px system-ui;color:${T.ink};cursor:pointer;line-height:1;padding:0">−</button>`;
+    html += `<div style="font:700 62px/1 system-ui;letter-spacing:-.04em;color:${sc};margin:2px 0;min-width:104px;text-align:center">${v}</div>`;
+    html += `<button data-action="inc" style="width:56px;height:56px;border-radius:50%;border:1px solid ${ia(.14)};background:${T.card};font:400 26px system-ui;color:${T.ink};cursor:pointer;line-height:1;padding:0">+</button>`;
+    html += `</div>`;
+
+    // Pills
+    const pills = ph === 'play' ? [1,2,3,4,6] : [2,4,6,8,12];
+    html += `<div style="display:flex;gap:6px">`;
+    pills.forEach(p => {
+      html += `<button data-action="pill${p}" style="padding:8px 13px;border-radius:999px;border:1px solid ${ia(.13)};background:transparent;font:500 12.5px ui-monospace,'SF Mono',Menlo,monospace;color:${ia(.7)};cursor:pointer">+${p}</button>`;
+    });
+    html += `</div>`;
+
+    // Hint
+    const hints = {
+      play: 'Pegging as you go — tap who scored, dial the points.',
+      hand1: names[nonDealer] + ' counts first: non-dealer always does.',
+      hand2: names[g.dealer] + ' counts their hand, then the box.',
+      crib: 'The box is ' + names[g.dealer] + "'s this deal. Counting it passes the deal."
+    };
+    const hint = v > 0 ? this.quip(v, scorer, ph, names) : hints[ph];
+    html += `<div style="font:400 11px system-ui;color:${ia(.45)};text-align:center;max-width:290px;text-wrap:pretty">${this.esc(hint)}</div>`;
+
+    html += `</div>`;
+
+    // Bottom buttons
+    const labels = { play: 'Peg ' + v, hand1: 'Count ' + v + ' →', hand2: 'Count ' + v + ' →', crib: 'Count box ' + v + ' →' };
+    const canPeg = ph !== 'play' || v > 0;
+    html += `<div style="display:flex;flex-direction:column;gap:8px;flex:none">`;
+    html += `<div style="display:flex;gap:10px">`;
+    html += `<button data-action="undo" style="flex:none;padding:0 16px;height:52px;border-radius:15px;border:1px solid ${ia(.16)};background:transparent;font:500 14px system-ui;color:${ia(.65)};cursor:pointer">Undo</button>`;
+    html += `<button data-action="commit" style="flex:1;height:52px;border-radius:15px;border:none;background:${canPeg?sc:ia(.11)};color:${canPeg?ON_ACCENT:ia(.4)};font:500 15px system-ui;cursor:pointer;transition:background .18s">${labels[ph]}</button>`;
+    html += `</div>`;
+    if (ph === 'play') {
+      html += `<button data-action="endPlay" style="height:42px;border-radius:13px;border:1px dashed ${ia(.24)};background:transparent;font:500 12.5px system-ui;color:${ia(.6)};cursor:pointer">End play · count hands →</button>`;
+    }
+    html += `</div>`;
+
+    html += `</div>`;
+    return html;
+  },
+
+  renderBoard(T, ia, g, names) {
+    let html = `<div style="background:${T.panel};border:1px solid ${ia(.09)};border-radius:20px;padding:18px 16px 14px;flex:none">`;
+    html += `<div style="position:relative;height:160px">`;
+
+    // Holes
+    for (let lane = 0; lane < 2; lane++) {
+      for (let i = 0; i < 120; i++) {
+        const q = this.serp(i);
+        html += `<div style="${this.dot(q.x, q.y + lane * 88, i)}"></div>`;
+      }
+      html += `<div style="position:absolute;left:2px;top:${3*22+lane*88-3}px;width:6px;height:6px;border-radius:50%;background:${ia(.34)}"></div>`;
+    }
+
+    // Divider
+    html += `<div style="position:absolute;left:-8px;right:-8px;top:79px;height:1px;background:${ia(.1)}"></div>`;
+
+    // Lane labels
+    html += `<div style="position:absolute;right:-4px;top:22px;font:500 9px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.1em;text-transform:uppercase;color:${PEG_A}">${this.esc(names[0])}</div>`;
+    html += `<div style="position:absolute;right:-4px;top:110px;font:500 9px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.1em;text-transform:uppercase;color:${PEG_B}">${this.esc(names[1])}</div>`;
+
+    // Back pegs
+    const b0 = this.serpPos(g.prev[0], 0, 1);
+    const b1 = this.serpPos(g.prev[1], 1, 1);
+    html += `<div style="${this.pegCSS(b0.x, b0.y, PEG_A)};opacity:.85;z-index:2${this.state.twoPegs?'':';display:none'}"></div>`;
+    html += `<div style="${this.pegCSS(b1.x, b1.y, PEG_B)};opacity:.85;z-index:2${this.state.twoPegs?'':';display:none'}"></div>`;
+
+    // Front pegs
+    const f0 = this.lerpPos(g.shown[0], 0);
+    const f1 = this.lerpPos(g.shown[1], 1);
+    html += `<div id="peg0" style="${this.pegCSS(f0.x, f0.y, PEG_A)}"></div>`;
+    html += `<div id="peg1" style="${this.pegCSS(f1.x, f1.y, PEG_B)}"></div>`;
+
+    html += `</div>`;
+    html += `<div style="display:flex;justify-content:flex-end;margin-top:12px;font:500 9px ui-monospace,'SF Mono',Menlo,monospace;color:${ia(.4)}"><span>121 TO WIN</span></div>`;
+    html += `</div>`;
+    return html;
+  },
+
+  renderWin(T, ia) {
+    const g = this.state.g;
+    const win = g.winner;
+    const names = this.getNames();
+    const loser = g.p[1 - win];
+    let sub;
+    if (loser < 61) sub = 'Double skunk — ' + names[1-win] + ' finished on ' + loser + '.';
+    else if (loser < 91) sub = 'Skunked. ' + names[1-win] + ' stalled at ' + loser + '.';
+    else sub = names[1-win] + ' finished on ' + loser + '.';
+
+    let html = `<div style="position:absolute;inset:0;background:${T.shadow};backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:32px">`;
+    html += `<div style="background:${T.bg};border-radius:24px;padding:30px 26px;text-align:center;color:${T.ink};animation:pop .22s ease-out">`;
+    html += `<div style="font:500 11px ui-monospace,'SF Mono',Menlo,monospace;letter-spacing:.14em;opacity:.5">GAME</div>`;
+    html += `<div style="font:700 40px/1.05 system-ui;letter-spacing:-.03em;margin:8px 0 6px">${this.esc(names[win])} takes it</div>`;
+    html += `<div style="font:400 13px system-ui;opacity:.6">${this.esc(sub)}</div>`;
+    html += `<button data-action="reset" style="margin-top:20px;padding:13px 22px;border-radius:14px;border:none;background:${T.ink};color:${T.bg};font:500 14px system-ui;cursor:pointer">New game</button>`;
+    html += `</div></div>`;
+    return html;
+  }
+};
+
+app.init();
+</script>
+</body>
+</html>
